@@ -2,49 +2,67 @@
 #include <MFRC522.h>
 #include <EEPROM.h>
 
-// Pin configuration based on your wiring
-#define RST_PIN    2     // RC522 RST -> ESP32 IO2
-#define SS_PIN     13    // RC522 SDA -> ESP32 IO13
+#define RST_PIN    13     // RC522 RST -> ESP32 IO2
+#define SS_PIN     2    // RC522 SDA -> ESP32 IO13
 #define FLASH_PIN  4     // ESP32-CAM flash LED (GPIO 4)
 
-#define EEPROM_SIZE 16   // enough for 4 bytes UID + status
+// EEPROM config
+#define EEPROM_SIZE 4096
+#define CARD_SIZE   12    // 4 bytes UID + 8 bytes password
+#define MAX_CARDS   (EEPROM_SIZE / CARD_SIZE)
 
-// Create MFRC522 instance
+// MFRC522 instance
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 
-// Master tag UID (replace with your master card’s UID)
+// Master card UID (change this to yours)
 byte masterUID[4] = {0x63, 0xA3, 0x44, 0x16};
 
-// Trusted tag UID storage
-byte trustedUID[4];
-bool trustedSet = false;
-bool waitingForTrusted = false;
+bool waitingForNewCard = false;
 
-void saveTrustedUID(byte *uid) {
-  for (int i = 0; i < 4; i++) {
-    EEPROM.write(i, uid[i]);
-    trustedUID[i] = uid[i];
+void saveCardToEEPROM(byte *uid, const char *password) {
+  // Find empty slot
+  for (int slot = 0; slot < MAX_CARDS; slot++) {
+    int addr = slot * CARD_SIZE;
+    if (EEPROM.read(addr) == 0xFF) { // empty
+      // Save UID
+      for (int i = 0; i < 4; i++) {
+        EEPROM.write(addr + i, uid[i]);
+      }
+      // Save password
+      for (int i = 0; i < 8; i++) {
+        EEPROM.write(addr + 4 + i, password[i]);
+      }
+      EEPROM.commit();
+      Serial.print("✅ Card saved in slot ");
+      Serial.println(slot);
+      return;
+    }
   }
-  EEPROM.write(4, 1); // Mark as set
-  EEPROM.commit();
-  trustedSet = true;
+  Serial.println("⚠️ EEPROM full! Cannot save new card.");
 }
 
-bool readTrustedUID() {
-  if (EEPROM.read(4) == 1) {
+bool findCardInEEPROM(byte *uid, char *passwordOut) {
+  for (int slot = 0; slot < MAX_CARDS; slot++) {
+    int addr = slot * CARD_SIZE;
+    if (EEPROM.read(addr) == 0xFF) continue; // empty slot
+
+    bool match = true;
     for (int i = 0; i < 4; i++) {
-      trustedUID[i] = EEPROM.read(i);
+      if (EEPROM.read(addr + i) != uid[i]) {
+        match = false;
+        break;
+      }
     }
-    return true;
+    if (match) {
+      // Copy password
+      for (int i = 0; i < 8; i++) {
+        passwordOut[i] = EEPROM.read(addr + 4 + i);
+      }
+      passwordOut[8] = '\0';
+      return true;
+    }
   }
   return false;
-}
-
-bool compareUID(byte *uid1, byte *uid2) {
-  for (byte i = 0; i < 4; i++) {
-    if (uid1[i] != uid2[i]) return false;
-  }
-  return true;
 }
 
 void printUID(byte *uid, byte size) {
@@ -59,10 +77,8 @@ void setup() {
   Serial.begin(115200);
   EEPROM.begin(EEPROM_SIZE);
 
-  // Load any saved trusted UID
-  trustedSet = readTrustedUID();
-
-  SPI.begin(14, 12, 15); // SCK=14, MISO=12, MOSI=15
+  // Initialize SPI and RFID
+  SPI.begin(14, 12, 15);
   mfrc522.PCD_Init();
 
   pinMode(FLASH_PIN, OUTPUT);
@@ -79,24 +95,25 @@ void loop() {
   Serial.print("Card UID:");
   printUID(mfrc522.uid.uidByte, mfrc522.uid.size);
 
-  if (waitingForTrusted) {
-    // Save this card as trusted
-    saveTrustedUID(mfrc522.uid.uidByte);
-    Serial.println("✅ New trusted UID saved!");
-    waitingForTrusted = false;
+  if (waitingForNewCard) {
+    saveCardToEEPROM(mfrc522.uid.uidByte, "00000000");
+    waitingForNewCard = false;
   }
-  else if (compareUID(mfrc522.uid.uidByte, masterUID)) {
-    Serial.println("🔑 Master card detected. Present next card to set as trusted.");
-    waitingForTrusted = true;
-  }
-  else if (trustedSet && compareUID(mfrc522.uid.uidByte, trustedUID)) {
-    Serial.println("✅ Trusted card detected. Flash ON!");
-    digitalWrite(FLASH_PIN, HIGH);
-    delay(1000);
-    digitalWrite(FLASH_PIN, LOW);
+  else if (memcmp(mfrc522.uid.uidByte, masterUID, 4) == 0) {
+    Serial.println("🔑 Master card detected. Present next card to add.");
+    waitingForNewCard = true;
   }
   else {
-    Serial.println("❌ Unknown card.");
+    char password[9];
+    if (findCardInEEPROM(mfrc522.uid.uidByte, password)) {
+      Serial.print("✅ Trusted card detected. Password: ");
+      Serial.println(password);
+      digitalWrite(FLASH_PIN, HIGH);
+      delay(1000);
+      digitalWrite(FLASH_PIN, LOW);
+    } else {
+      Serial.println("❌ Unknown card.");
+    }
   }
 
   mfrc522.PICC_HaltA();
