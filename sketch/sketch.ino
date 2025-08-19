@@ -1,6 +1,8 @@
+
 #include <SPI.h>
 #include <MFRC522.h>
 #include <EEPROM.h>
+#define CONFIG_CAMERA_TASK_STACK_SIZE 10240
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <ArduinoWebsockets.h>
@@ -32,7 +34,7 @@ MFRC522 mfrc522(SS_PIN, RST_PIN);
 bool waitingForNewCard = false;
 
 // --- Camera pins (AI-Thinker) ---
-#define PWDN_GPIO_NUM     32
+#define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
 #define SIOD_GPIO_NUM     26
@@ -67,18 +69,18 @@ bool initCamera() {
   config.pin_href     = HREF_GPIO_NUM;
   config.pin_sscb_sda = SIOD_GPIO_NUM;
   config.pin_sscb_scl = SIOC_GPIO_NUM;
-  config.pin_pwdn     = PWDN_GPIO_NUM;
+  config.pin_pwdn     = 32;
   config.pin_reset    = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_VGA;
-    config.jpeg_quality = 10;
-    config.fb_count = 2;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 15;
+    config.fb_count = 1;
   } else {
     config.frame_size = FRAMESIZE_QVGA;
-    config.jpeg_quality = 12;
+    config.jpeg_quality = 18;
     config.fb_count = 1;
   }
 
@@ -88,25 +90,37 @@ bool initCamera() {
   }
   return true;
 }
-
 void takePhotoAndSend() {
-  //digitalWrite(FLASH_PIN, HIGH);
-  delay(200);
+  camera_fb_t *fb = nullptr;
 
-  camera_fb_t *fb = esp_camera_fb_get();
+  // Try to capture a frame
+  fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("❌ Camera capture failed!");
-    digitalWrite(FLASH_PIN, LOW);
-    return;
+    return; // don't continue if capture failed
   }
 
-  Serial.println("📡 Sending image via WebSocket...");
-  wsClient.sendBinary((const char*)fb->buf, fb->len);
-  wsClient.get
+  Serial.printf("📷 Captured frame: %d bytes\n", fb->len);
 
+  // Try sending the photo
+  bool success = false;
+  if (wsClient.available()) {
+    // Wrap in try/catch-like protection
+    success = wsClient.sendBinary((const char*)fb->buf, fb->len);
+    if (!success) {
+      Serial.println("⚠️ WebSocket send failed.");
+    } else {
+      Serial.println("✅ Image sent over WebSocket.");
+    }
+  } else {
+    Serial.println("⚠️ WebSocket not connected, skipping send.");
+  }
+
+  // Always release frame buffer to avoid memory leaks
   esp_camera_fb_return(fb);
-  digitalWrite(FLASH_PIN, LOW);
+  fb = nullptr;
 }
+
 
 void saveCardToEEPROM(byte *uid, const char *pass) {
   for (int slot = 0; slot < MAX_CARDS; slot++) {
