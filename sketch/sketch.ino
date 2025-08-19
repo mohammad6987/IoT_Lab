@@ -24,9 +24,10 @@ bool cardAuthorized = false;
 
 // ================= WebSockets =================
 WebsocketsClient faceClient;
-
+WebsocketsClient cardClient;
 
 const char* face_server = "ws://10.252.208.122:80"; 
+const char* card_server = "ws://10.252.208.122:82"; 
 
 // ================= Camera =================
 // OV2640 settings
@@ -47,12 +48,6 @@ const char* face_server = "ws://10.252.208.122:80";
 #define VSYNC_GPIO_NUM 25
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
-
-
-
-#define EEPROM_SIZE 4096
-#define CARD_SIZE   12    
-#define MAX_CARDS   (EEPROM_SIZE / CARD_SIZE)
 
 // ================= Helper Functions =================
 String uidToString(byte *buffer, byte bufferSize) {
@@ -135,13 +130,16 @@ String sendPhoto(camera_fb_t *fb, const String &purpose, unsigned long timeout =
         return "ERROR: Not connected";
     }
 
+    // Step 1: Send purpose header
     String header = "{\"type\":\"photo\",\"purpose\":\"" + purpose + "\",\"length\":" + String(fb->len) + "}";
     faceClient.send(header);
     Serial.println("📩 Sent photo header: " + header);
 
+    // Step 2: Send image
     faceClient.sendBinary((const char*)fb->buf, fb->len);
     Serial.println("📸 Photo sent to face server.");
 
+    // Step 3: Wait for response
     unsigned long start = millis();
     String response = "";
 
