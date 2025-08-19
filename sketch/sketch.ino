@@ -6,31 +6,33 @@
 #define CONFIG_CAMERA_TASK_STACK 6144
 #define CONFIG_CAMERA_PSRAM_DMA 1
 #include "esp_camera.h"
-using namespace websockets;  
+using namespace websockets;
 
-// ================= WiFi =================
+
 const char *ssid = "POCO";
 const char *password = "wizkid6884";
 
-// ================= RFID =================
+
 #define SS_PIN 13
 #define RST_PIN 2
 MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+String MASTER_UID = "63A34416";
 
 unsigned long lastCardRead = 0;
 const unsigned long CARD_READ_COOLDOWN = 3000;
 bool waitingForNewCard = false;
 bool cardAuthorized = false;
+String lastScannedUID = "";
 
-// ================= WebSockets =================
+
 WebsocketsClient faceClient;
 WebsocketsClient cardClient;
 
-const char* face_server = "ws://10.252.208.122:80"; 
-const char* card_server = "ws://10.252.208.122:82"; 
+const char* face_server = "ws://10.252.208.122:80";
+const char* card_server = "ws://10.252.208.122:84";
 
-// ================= Camera =================
-// OV2640 settings
+
 #define PWDN_GPIO_NUM 32
 #define RESET_GPIO_NUM -1
 #define XCLK_GPIO_NUM 0
@@ -49,7 +51,7 @@ const char* card_server = "ws://10.252.208.122:82";
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
-// ================= Helper Functions =================
+
 String uidToString(byte *buffer, byte bufferSize) {
   String uid = "";
   for (byte i = 0; i < bufferSize; i++) {
@@ -76,7 +78,7 @@ void checkMemory() {
   }
 }
 
-// ========== Camera Init ==========
+
 void initCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -123,37 +125,65 @@ void initCamera() {
   }
 }
 
-// ========== Capture & Send Photo ==========
+
 String sendPhoto(camera_fb_t *fb, const String &purpose, unsigned long timeout = 5000) {
-    if (!faceClient.available()) {
-        Serial.println("⛔ Face Server is not connected!");
-        return "ERROR: Not connected";
+  if (!faceClient.available()) {
+    Serial.println("⛔ Face Server is not connected!");
+    return "ERROR: Not connected";
+  }
+
+ 
+  String header = "{\"type\":\"photo\",\"purpose\":\"" + purpose + "\",\"length\":" + String(fb->len) + "}";
+  faceClient.send(header);
+  Serial.println("📩 Sent photo header: " + header);
+
+
+  faceClient.sendBinary((const char*)fb->buf, fb->len);
+  Serial.println("📸 Photo sent to face server.");
+
+
+  unsigned long start = millis();
+  String response = "";
+
+  while (response == "") {
+    faceClient.poll();
+    if (millis() - start > timeout) {
+      return "ERROR: Timeout";
     }
+  }
 
-    // Step 1: Send purpose header
-    String header = "{\"type\":\"photo\",\"purpose\":\"" + purpose + "\",\"length\":" + String(fb->len) + "}";
-    faceClient.send(header);
-    Serial.println("📩 Sent photo header: " + header);
-
-    // Step 2: Send image
-    faceClient.sendBinary((const char*)fb->buf, fb->len);
-    Serial.println("📸 Photo sent to face server.");
-
-    // Step 3: Wait for response
-    unsigned long start = millis();
-    String response = "";
-
-    while (response == "") {
-        faceClient.poll();
-        if (millis() - start > timeout) {
-            return "ERROR: Timeout";
-        }
-    }
-
-    return response;
+  return response;
 }
 
-// ================= Setup =================
+
+void onCardMessage(WebsocketsMessage message) {
+  Serial.println("📩 Card Server: " + message.data());
+  
+
+  String data = message.data();
+  if (data.indexOf("\"status\":\"authorized\"") >= 0) {
+    Serial.println("✅ Card authorized. Taking photo...");
+    cardAuthorized = true;
+  } else if (data.indexOf("\"status\":\"unauthorized\"") >= 0) {
+    Serial.println("❌ Card not authorized.");
+    cardAuthorized = false;
+  } else if (data.indexOf("\"status\":\"added\"") >= 0) {
+    Serial.println("✅ Card added to database.");
+    waitingForNewCard = false;
+  }
+}
+
+
+void connectCardServer() {
+  if (cardClient.connect(card_server)) {
+    Serial.println("✅ Connected to card server!");
+    cardClient.onMessage(onCardMessage);
+  } else {
+    Serial.println("❌ Failed to connect to card server!");
+  }
+}
+
+
 void setup() {
   Serial.begin(115200);
   checkMemory();
@@ -166,45 +196,94 @@ void setup() {
   }
   Serial.println("\n✅ WiFi connected.");
 
-  // Init RFID
+
   SPI.begin(14, 12, 15);
   mfrc522.PCD_Init();
 
-  // Connect WebSocket Face Server
+
   faceClient.onMessage([](WebsocketsMessage msg){
     Serial.println("📩 Face Server: " + msg.data());
   });
-  faceClient.onEvent([](WebsocketsEvent event, String data){
-    if(event == WebsocketsEvent::ConnectionOpened){
-        Serial.println("✅ Face WS connected");
-    } else if(event == WebsocketsEvent::ConnectionClosed){
-        Serial.println("❌ Face WS disconnected");
-    }
-  });
 
   if (faceClient.connect(face_server)) {
-    Serial.println("✅ WebSocket connected!");
+    Serial.println("✅ Connected to face server!");
   } else {
-    Serial.println("❌ WebSocket connect failed!");
+    Serial.println("❌ Failed to connect to face server!");
   }
 
-  // Init camera
+
+  connectCardServer();
+
+
   initCamera();
+  
+  Serial.println("System ready. Scan an RFID card...");
 }
 
 // ================= Loop =================
 void loop() {
-  faceClient.poll();  // keep WS alive
+  faceClient.poll();
+  cardClient.poll();
 
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-  } else {
-    sendPhoto(fb, "add");
-    delay(5000);
-    sendPhoto(fb, "check");
-    esp_camera_fb_return(fb);
+
+  if (!cardClient.available()) {
+    static unsigned long lastReconnectAttempt = 0;
+    if (millis() - lastReconnectAttempt > 5000) {
+      connectCardServer();
+      lastReconnectAttempt = millis();
+    }
   }
 
-  delay(10000);
+
+  if (millis() - lastCardRead < CARD_READ_COOLDOWN) return;
+  
+  
+  if (!mfrc522.PICC_IsNewCardPresent()) return;
+  if (!mfrc522.PICC_ReadCardSerial()) return;
+
+  lastCardRead = millis();
+  String uidStr = uidToString(mfrc522.uid.uidByte, mfrc522.uid.size);
+  Serial.println("Card UID: " + uidStr);
+  lastScannedUID = uidStr;
+
+
+  if (uidStr == MASTER_UID) {
+    Serial.println("🔑 Master card detected. Ready to add new card.");
+    waitingForNewCard = true;
+  } 
+  // Check if we're in "add new card" mode
+  else if (waitingForNewCard) {
+    if (cardClient.available()) {
+      String addMsg = "{\"action\":\"add\",\"uid\":\"" + uidStr + "\"}";
+      cardClient.send(addMsg);
+      Serial.println("📤 Sent add request: " + addMsg);
+    } else {
+      Serial.println("❌ Card server not available for adding card");
+    }
+  } 
+  // Normal card check
+  else {
+    if (cardClient.available()) {
+      String checkMsg = "{\"action\":\"check\",\"uid\":\"" + uidStr + "\"}";
+      cardClient.send(checkMsg);
+      Serial.println("📤 Sent check request: " + checkMsg);
+    } else {
+      Serial.println("❌ Card server not available for checking card");
+    }
+  }
+
+  mfrc522.PICC_HaltA();
+
+  if (cardAuthorized) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+      sendPhoto(fb, "recognition");
+      esp_camera_fb_return(fb);
+    } else {
+      Serial.println("❌ Failed to capture image");
+    }
+    cardAuthorized = false;
+  }
+  
+  delay(400); 
 }
