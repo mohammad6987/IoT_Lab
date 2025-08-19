@@ -7,6 +7,7 @@
 #define CONFIG_CAMERA_PSRAM_DMA 1
 #include "esp_camera.h"
 using namespace websockets;  
+
 // ================= WiFi =================
 const char *ssid = "POCO";
 const char *password = "wizkid6884";
@@ -23,9 +24,9 @@ bool cardAuthorized = false;
 
 // ================= WebSockets =================
 WebsocketsClient faceClient;
-WebsocketsClient cardClient;
 
-const char* face_server = "ws://10.252.208.122:81";
+
+const char* face_server = "ws://10.252.208.122:80"; 
 
 // ================= Camera =================
 // OV2640 settings
@@ -47,6 +48,12 @@ const char* face_server = "ws://10.252.208.122:81";
 #define HREF_GPIO_NUM 23
 #define PCLK_GPIO_NUM 22
 
+
+
+#define EEPROM_SIZE 4096
+#define CARD_SIZE   12    
+#define MAX_CARDS   (EEPROM_SIZE / CARD_SIZE)
+
 // ================= Helper Functions =================
 String uidToString(byte *buffer, byte bufferSize) {
   String uid = "";
@@ -58,9 +65,21 @@ String uidToString(byte *buffer, byte bufferSize) {
   return uid;
 }
 
+void printMemoryInfo() {
+  Serial.printf("Free Heap: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("Min Free Heap: %d bytes\n", ESP.getMinFreeHeap());
+  Serial.printf("Max Alloc Heap: %d bytes\n", ESP.getMaxAllocHeap());
+  if (psramFound()) {
+    Serial.printf("PSRAM Size: %d bytes\n", ESP.getPsramSize());
+    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
+  }
+}
 
-
-
+void checkMemory() {
+  if (ESP.getFreeHeap() < 10000) {
+    Serial.println("Warning: Low memory!");
+  }
+}
 
 // ========== Camera Init ==========
 void initCamera() {
@@ -90,60 +109,50 @@ void initCamera() {
   if (psramFound()) {
     Serial.println("found PSRAM!!!!!!!!!");
     config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 12;
+    config.jpeg_quality = 8;
     config.fb_count = 1;
   } else {
     config.frame_size = FRAMESIZE_QVGA;
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }
+
   printMemoryInfo();
   if (esp_camera_init(&config) != ESP_OK) {
     Serial.println("❌ Camera init failed");
-} else {
+  } else {
     Serial.println("✅ Camera init OK");
     sensor_t *s = esp_camera_sensor_get();
-    Serial.println("Got Sensor");
     s->set_framesize(s, FRAMESIZE_QVGA);
     Serial.println("set FrameSize!");
-}
-  
+  }
 }
 
 // ========== Capture & Send Photo ==========
-void takePhotoAndSend() {
-  if (!faceClient.available()) return;
+String sendPhoto(camera_fb_t *fb, const String &purpose, unsigned long timeout = 5000) {
+    if (!faceClient.available()) {
+        Serial.println("⛔ Face Server is not connected!");
+        return "ERROR: Not connected";
+    }
 
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    return;
-  }
+    String header = "{\"type\":\"photo\",\"purpose\":\"" + purpose + "\",\"length\":" + String(fb->len) + "}";
+    faceClient.send(header);
+    Serial.println("📩 Sent photo header: " + header);
 
-  Serial.printf("📸 Captured photo, size: %d bytes\n", fb->len);
+    faceClient.sendBinary((const char*)fb->buf, fb->len);
+    Serial.println("📸 Photo sent to face server.");
 
-  // Send binary data over WebSocket
-  faceClient.sendBinary(fb->buf, fb->len);
-  Serial.println("📤 Photo sent to face server.");
+    unsigned long start = millis();
+    String response = "";
 
-  esp_camera_fb_return(fb);
-}
+    while (response == "") {
+        faceClient.poll();
+        if (millis() - start > timeout) {
+            return "ERROR: Timeout";
+        }
+    }
 
-
-void printMemoryInfo() {
-  Serial.printf("Free Heap: %d bytes\n", ESP.getFreeHeap());
-  Serial.printf("Min Free Heap: %d bytes\n", ESP.getMinFreeHeap());
-  Serial.printf("Max Alloc Heap: %d bytes\n", ESP.getMaxAllocHeap());
-  if (psramFound()) {
-    Serial.printf("PSRAM Size: %d bytes\n", ESP.getPsramSize());
-    Serial.printf("Free PSRAM: %d bytes\n", ESP.getFreePsram());
-  }
-}
-
-void checkMemory() {
-  if (ESP.getFreeHeap() < 10000) {
-    Serial.println("Warning: Low memory!");
-  }
+    return response;
 }
 
 // ================= Setup =================
@@ -158,21 +167,22 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\n✅ WiFi connected.");
-  checkMemory();
-  printMemoryInfo();
 
   // Init RFID
   SPI.begin(14, 12, 15);
   mfrc522.PCD_Init();
 
-  SPI.beginTransaction(SPISettings(1000000, MSBFIRST, SPI_MODE0));
-  uint8_t response = SPI.transfer(0x00);
-  SPI.endTransaction();
-
-  Serial.print("SPI test response: 0x");
-  Serial.println(response, HEX);
-  checkMemory();
-  printMemoryInfo();
+  // Connect WebSocket Face Server
+  faceClient.onMessage([](WebsocketsMessage msg){
+    Serial.println("📩 Face Server: " + msg.data());
+  });
+  faceClient.onEvent([](WebsocketsEvent event, String data){
+    if(event == WebsocketsEvent::ConnectionOpened){
+        Serial.println("✅ Face WS connected");
+    } else if(event == WebsocketsEvent::ConnectionClosed){
+        Serial.println("❌ Face WS disconnected");
+    }
+  });
 
   if (faceClient.connect(face_server)) {
     Serial.println("✅ WebSocket connected!");
@@ -180,175 +190,23 @@ void setup() {
     Serial.println("❌ WebSocket connect failed!");
   }
 
-  checkMemory();
-  printMemoryInfo();
-
-
-  delay(1000);
   // Init camera
   initCamera();
-  checkMemory();
-  
-
-  // Connect WS4
-} 
-
-
-
-String cardServerResponse = "";
-
-bool waitingCardResponse = false;
-
-
-void setupWebSocket() {
-    faceClient.onMessage([](WebsocketsMessage message) {
-        Serial.print("Face server message: ");
-        Serial.println(message.data());
-        // handle response
-    });
-
-    faceClient.onEvent([](WebsocketsEvent event, String data) {
-        if(event == WebsocketsEvent::ConnectionOpened){
-            Serial.println("Face WS connected");
-        } else if(event == WebsocketsEvent::ConnectionClosed){
-            Serial.println("Face WS disconnected");
-        } else if(event == WebsocketsEvent::GotPing){
-            Serial.println("Ping received");
-        } else if(event == WebsocketsEvent::GotPong){
-            Serial.println("Pong received");
-        }
-    });
 }
-
-
-
-String sendCardRequestAndWait(String msg, unsigned long timeout = 5000) {
-  if (!cardClient.avaiable()) return "ERROR: Not connected";
-
-  waitingCardResponse = true;
-  cardClient.sendTXT(msg);
-
-  unsigned long start = millis();
-  while (waitingCardResponse) {
-    cardClient.loop(); // keep WebSocket alive
-    if (millis() - start > timeout) {
-      waitingCardResponse = false;
-      return "ERROR: Timeout";
-    }
-  }
-  return cardServerResponse;
-}
-
-
-String photoServerResponse = "";
-bool waitingPhotoResponse = false;
-
-
-
-String sendPhoto(camera_fb_t *fb, const String &purpose, unsigned long timeout = 5000) {
-    if (!faceClient.available()) {
-        Serial.println("⛔ Face Server is not connected!");
-        return "ERROR: Not connected";
-    }
-
-    // Step 1: Send purpose header
-    String header = "{\"type\":\"photo\",\"purpose\":\"" + purpose + "\",\"length\":" + String(fb->len) + "}";
-    faceClient.sendTXT(header);
-    Serial.println("📩 Sent photo header: " + header);
-
-    // Step 2: Send image
-    faceClient.sendBIN(fb->buf, fb->len);
-    Serial.println("📸 Photo sent to face server.");
-
-    // Step 3: Wait for response
-    photoServerResponse = "";
-    waitingPhotoResponse = true;
-    unsigned long start = millis();
-
-    while (waitingPhotoResponse) {
-        faceClient.loop();  // keep websocket alive
-
-        if (millis() - start > timeout) {
-            waitingPhotoResponse = false;
-            return "ERROR: Timeout";
-        }
-    }
-
-    return photoServerResponse;
-}
-
 
 // ================= Loop =================
-/*
 void loop() {
-  if (millis() - lastCardRead < CARD_READ_COOLDOWN) {
-  Serial.println("Cooldown active");
-  return;
-}
-if (!mfrc522.PICC_IsNewCardPresent()) {
-  //Serial.println("No new card present");
-  return;
-}
-if (!mfrc522.PICC_ReadCardSerial()) {
-  Serial.println("Failed to read card serial");
-  //return;
-}
-  lastCardRead = millis();
-  //String uidStr = uidToString(mfrc522.uid.uidByte, mfrc522.uid.size);
-  String uidStr = "10.00.00.10";
-  Serial.println("Card UID: " + uidStr);
+  faceClient.poll();  // keep WS alive
 
-  String cardResponse;
-
-  if (waitingForNewCard) {
-    cardResponse = sendCardRequestAndWait("{\"type\":\"add_card\",\"uid\":\"" + uidStr + "\"}");
-    Serial.println("📩 Card server response: " + cardResponse);
-    waitingForNewCard = false;
-  } else if (uidStr == "MASTERUID") {
-    Serial.println("🔑 Master card detected → next card will be added");
-    waitingForNewCard = true;
-  } else {
-    cardResponse = sendCardRequestAndWait("{\"type\":\"check_card\",\"uid\":\"" + uidStr + "\"}");
-    Serial.println("📩 Card server response: " + cardResponse);
-
-    if (cardResponse.indexOf("\"status\":\"ok\"") > 0) {
-      Serial.println("✅ Card authorized → capturing photo");
-      camera_fb_t *fb = esp_camera_fb_get();
-      if (fb) {
-        faceClient.sendBIN(fb->buf, fb->len);  // send to face server
-        esp_camera_fb_return(fb);
-      }
-      String faceResponse = sendFaceRequestAndWait("{\"type\":\"check_face\"}");
-      Serial.println("📩 Face server response: " + faceResponse);
-    } else {
-      Serial.println("⛔ Card denied");
-    }
-  }
-
-  mfrc522.PICC_HaltA();
-}*/
-
-void loop() {
-  // Wait for cooldown
-  faceClient.loop();
-  
-  // ===== Only take photo for any card =====
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
   } else {
     sendPhoto(fb, "add");
-  }
-  delay(10000);
-  if (!fb) {
-    Serial.println("Camera capture failed");
-  } else {
+    delay(5000);
     sendPhoto(fb, "check");
+    esp_camera_fb_return(fb);
   }
-  esp_camera_fb_return(fb);
-  delay(100000);
 
-
+  delay(10000);
 }
-
-
