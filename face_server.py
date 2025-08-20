@@ -28,7 +28,7 @@ def validate_face(image_path):
     Returns: (has_face, face_count, error_message)
     """
     try:
-        # Try to detect faces in the image
+        
         face_objs = DeepFace.extract_faces(
             img_path=image_path,
             detector_backend="opencv",
@@ -36,11 +36,11 @@ def validate_face(image_path):
             align=False
         )
         
-        # Check if any faces were detected
+    
         if not face_objs:
             return False, 0, "No faces detected in the image"
         
-        # Count valid faces (with confidence above threshold)
+        
         valid_faces = [face for face in face_objs if face.get('confidence', 0) > 0.8]
         face_count = len(valid_faces)
         
@@ -61,7 +61,7 @@ def analyze_face(image_path):
     try:
         print(f"{COLOR_INFO}[ANALYSIS] Starting face search for: {os.path.basename(image_path)}")
         
-        # First validate the face
+
         has_face, face_count, message = validate_face(image_path)
         if not has_face:
             return {"status": "error", "message": message}

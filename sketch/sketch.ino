@@ -2,8 +2,9 @@
 #include <ArduinoWebsockets.h>
 #include <SPI.h>
 #include <MFRC522.h>
+#define CONFIG_CAMERA_DMA_BUFFER_SIZE_MAX 32768
 #define CONFIG_CAMERA_JPEG_MODE_FRAME_SIZE_AUTO false
-#define CONFIG_CAMERA_TASK_STACK 6144
+#define CONFIG_CAMERA_TASK_STACK 6244
 #define CONFIG_CAMERA_PSRAM_DMA 1
 #include "esp_camera.h"
 using namespace websockets;
@@ -99,15 +100,15 @@ void initCamera() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;
+  config.xclk_freq_hz = 8000000;
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
   if (psramFound()) {
     Serial.println("found PSRAM!!!!!!!!!");
-    config.frame_size = FRAMESIZE_SVGA;
-    config.jpeg_quality = 8;
-    config.fb_count = 1;
+    config.frame_size = FRAMESIZE_QVGA;
+    config.jpeg_quality = 20;
+    config.fb_count = 2;
   } else {
     config.frame_size = FRAMESIZE_QVGA;
     config.jpeg_quality = 12;
@@ -197,7 +198,7 @@ void setup() {
   Serial.println("\n✅ WiFi connected.");
 
 
-  SPI.begin(14, 12, 15);
+  SPI.begin(14, 12, 15,2);
   mfrc522.PCD_Init();
 
 
@@ -220,7 +221,7 @@ void setup() {
   Serial.println("System ready. Scan an RFID card...");
 }
 
-// ================= Loop =================
+
 void loop() {
   faceClient.poll();
   cardClient.poll();
@@ -285,5 +286,5 @@ void loop() {
     cardAuthorized = false;
   }
   
-  delay(400); 
+  delay(500); 
 }
