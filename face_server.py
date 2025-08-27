@@ -38,6 +38,7 @@ def validate_face(image_path):
         
     
         if not face_objs:
+            print(f"[DEBUG] No faces detected in {image_path}")
             return False, 0, "No faces detected in the image"
         
         
@@ -144,8 +145,8 @@ async def photo_handler(websocket):
                     await websocket.send(json.dumps(response))
                     await broadcast_status({"status": "error", "message": message, "timestamp": timestamp.isoformat()})
                     
-                    # Schedule deletion of invalid image
-                    asyncio.create_task(delete_photo_after_delay(5, image_path, filename))
+                    print("there was no face!!")
+                    asyncio.create_task(delete_photo_after_delay(30, image_path, filename))
                     continue
                 
                 # Process based on purpose
@@ -157,7 +158,7 @@ async def photo_handler(websocket):
                         await broadcast_status({"status": "error", "message": "Multiple faces in registration attempt", "timestamp": timestamp.isoformat()})
                         
                         # Schedule deletion
-                        asyncio.create_task(delete_photo_after_delay(5, image_path, filename))
+                        asyncio.create_task(delete_photo_after_delay(30, image_path, filename))
                         continue
                     
                     # Add the face to the database
@@ -174,7 +175,7 @@ async def photo_handler(websocket):
                     response = {"status": analysis_result.get("status"),
                                 "person": analysis_result.get("person", "N/A"),
                                 "message": analysis_result.get("message", "")}
-                
+                print("sending answer!")
                 await websocket.send(json.dumps(response))
                 await broadcast_status({
                     "status": response["status"], 
@@ -223,10 +224,10 @@ async def main():
     print(f"============================================={Style.RESET_ALL}")
    
     # Start both servers
-    async with websockets.serve(photo_handler, "0.0.0.0", 80), \
-               websockets.serve(status_handler, "0.0.0.0", 83):
-        print(f"{COLOR_SUCCESS}[SYSTEM] Photo server running on ws://0.0.0.0:80")
-        print(f"{COLOR_SUCCESS}[SYSTEM] Status broadcast server running on ws://0.0.0.0:83")
+    async with websockets.serve(photo_handler, "0.0.0.0", 8080):
+               #websockets.serve(status_handler, "0.0.0.0", 83):
+        print(f"{COLOR_SUCCESS}[SYSTEM] Photo server running on ws://0.0.0.0:8080")
+        #print(f"{COLOR_SUCCESS}[SYSTEM] Status broadcast server running on ws://0.0.0.0:83")
         print("Waiting for connections...")
         await asyncio.Future()  # Run forever
 
